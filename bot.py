@@ -56,6 +56,17 @@ class UOMI:
             },
             {
                 "type": "function",
+                "name": "multicall",
+                "stateMutability": "payable",
+                "inputs": [
+                    { "internalType": "bytes[]", "name": "data", "type": "bytes[]" }
+                ],
+                "outputs": [
+                    { "internalType": "bytes[]", "name": "results", "type": "bytes[]" }
+                ]
+            },
+            {
+                "type": "function",
                 "name": "mint",
                 "stateMutability": "nonpayable",
                 "inputs": [
@@ -96,6 +107,7 @@ class UOMI:
         self.min_swap_amount = 0
         self.max_swap_amount = 0
         self.liquidity_count = 0
+        self.uomi_amount = 0
         self.wuomi_amount = 0
         self.syn_amount = 0
         self.sim_amount = 0
@@ -238,21 +250,24 @@ class UOMI:
 
     def generate_liquidity_option(self):
         swap_options = [
-            ("WUOMI", "USDC", self.WUOMI_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.wuomi_amount),
-            ("SYN", "WUOMI", self.SYN_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.syn_amount),
-            ("SYN", "USDC", self.SYN_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.syn_amount),
-            ("SIM", "WUOMI", self.SIM_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.sim_amount),
-            ("SIM", "USDC", self.SIM_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.sim_amount),
-            ("SIM", "SYN", self.SIM_CONTRACT_ADDRESS, self.SYN_CONTRACT_ADDRESS, self.sim_amount)
+            # ("native", "USDC", "UOMI", self.USDC_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.usdc_amount),
+            ("native", "SYN", "UOMI", self.SYN_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.uomi_amount),
+            ("native", "SIM", "UOMI", self.SIM_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.uomi_amount),
+            ("erc20", "WUOMI", "USDC", self.WUOMI_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.wuomi_amount),
+            ("erc20", "SYN", "WUOMI", self.SYN_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.syn_amount),
+            ("erc20", "SYN", "USDC", self.SYN_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.syn_amount),
+            ("erc20", "SIM", "WUOMI", self.SIM_CONTRACT_ADDRESS, self.WUOMI_CONTRACT_ADDRESS, self.sim_amount),
+            ("erc20", "SIM", "USDC", self.SIM_CONTRACT_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.sim_amount),
+            ("erc20", "SIM", "SYN", self.SIM_CONTRACT_ADDRESS, self.SYN_CONTRACT_ADDRESS, self.sim_amount)
         ]
 
-        ticker0, ticker1, token0, token1, amount0 = random.choice(swap_options)
+        token_type, ticker0, ticker1, token0, token1, amount0 = random.choice(swap_options)
 
         liquidity_option = f"{ticker0}/{ticker1}"
 
         amount0_desired = int(amount0 * (10 ** 18))
 
-        return liquidity_option, ticker0, ticker1, token0, token1, amount0_desired
+        return liquidity_option, token_type, ticker0, ticker1, token0, token1, amount0_desired
         
     async def get_web3_with_check(self, address: str, use_proxy: bool, retries=3, timeout=60):
         request_kwargs = {"timeout": timeout}
@@ -404,6 +419,18 @@ class UOMI:
             )
             return None, None
         
+    async def get_amount_out_min(self, address: str, path: str, amount_in_wei: int, use_proxy: bool):
+        try:
+            web3 = await self.get_web3_with_check(address, use_proxy)
+
+            contract = web3.eth.contract(address=web3.to_checksum_address(self.QUOTER_ROUTER_ADDRESS), abi=self.UOMI_CONTRACT_ABI)
+
+            amount_out = contract.functions.quoteExactInput(path, amount_in_wei).call()
+            
+            return amount_out
+        except Exception as e:
+            return None
+        
     async def approving_token(self, account: str, address: str, router_address: str, asset_address: str, amount_to_wei: int, use_proxy: bool):
         try:
             web3 = await self.get_web3_with_check(address, use_proxy)
@@ -456,18 +483,6 @@ class UOMI:
             return True
         except Exception as e:
             raise Exception(f"Approving Token Contract Failed: {str(e)}")
-    
-    async def get_amount_out_min(self, address: str, path: str, amount_in_wei: int, use_proxy: bool):
-        try:
-            web3 = await self.get_web3_with_check(address, use_proxy)
-
-            contract = web3.eth.contract(address=web3.to_checksum_address(self.QUOTER_ROUTER_ADDRESS), abi=self.UOMI_CONTRACT_ABI)
-
-            amount_out = contract.functions.quoteExactInput(path, amount_in_wei).call()
-            
-            return amount_out
-        except Exception as e:
-            return None
         
     async def perform_swap(self, account: str, address: str, from_token: str, to_token: str, amount_in: float, use_proxy: bool):
         try:
@@ -540,48 +555,81 @@ class UOMI:
             )
             return None, None
         
-    async def perform_liquidity(self, account: str, address: str, token0: str, token1: str, amount0_desired: int, amount1_desired: int, use_proxy: bool):
+    def generate_liquidity_calldata(self, address: str, token_type: str, token0: str, token1: str, amount0_desired: int, amount1_desired: int):
         try:
-            web3 = await self.get_web3_with_check(address, use_proxy)
-            
-            await self.approving_token(account, address, self.POSITION_ROUTER_ADDRESS, token0, amount0_desired, use_proxy)
-            await self.approving_token(account, address, self.POSITION_ROUTER_ADDRESS, token1, amount1_desired, use_proxy)
-            
             amount0_min = (amount0_desired * (10000 - 100)) // 10000
             amount1_min = (amount1_desired * (10000 - 100)) // 10000
             deadline = int(time.time()) + 600
 
-            mint_params = (
-                token0, 
-                token1, 
-                3000, 
-                -887220, 
-                887220, 
-                amount0_desired, 
-                amount1_desired, 
-                amount0_min, 
-                amount1_min, 
-                address, 
-                deadline
-            )
+            if token_type == "native":
+                prefix = bytes.fromhex("88316456")
+                mint_params = encode(
+                    [
+                        'address', 'address', 'uint24', 'int24', 'int24', 'uint256', 
+                        'uint256', 'uint256', 'uint256', 'address', 'uint256'
+                    ],
+                    [
+                        token0, token1, 3000, -887220, 887220, amount0_desired,
+                        amount1_desired, amount0_min, amount1_min, address, deadline
+                    ]
+                )
+
+                mint =  prefix + mint_params
+                refund_eth = bytes.fromhex("12210e8a")
+
+                calldata = [mint, refund_eth]
+
+            elif token_type == "erc20":
+                calldata = (
+                    token0, token1, 3000, -887220, 887220, amount0_desired, 
+                    amount1_desired, amount0_min, amount1_min, address, deadline
+                )
+
+            return calldata
+        except Exception as e:
+            raise Exception(f"Generate Calldata Failed: {str(e)}")
+        
+    async def perform_liquidity(self, account: str, address: str, token_type: str, token0: str, token1: str, amount0_desired: int, amount1_desired: int, use_proxy: bool):
+        try:
+            web3 = await self.get_web3_with_check(address, use_proxy)
+            
+            await self.approving_token(account, address, self.POSITION_ROUTER_ADDRESS, token0, amount0_desired, use_proxy)
+
+            if token_type == "erc20":
+                await self.approving_token(account, address, self.POSITION_ROUTER_ADDRESS, token1, amount1_desired, use_proxy)
+            
 
             token_contract = web3.eth.contract(address=web3.to_checksum_address(self.POSITION_ROUTER_ADDRESS), abi=self.UOMI_CONTRACT_ABI)
 
-            liquidity_data = token_contract.functions.mint(mint_params)
-
-            estimated_gas = liquidity_data.estimate_gas({"from": address})
+            calldata = self.generate_liquidity_calldata(address, token_type, token0, token1, amount0_desired, amount1_desired)
 
             max_priority_fee = web3.to_wei(28.54, "gwei")
             max_fee = max_priority_fee
 
-            liquidity_tx = liquidity_data.build_transaction({
-                "from": address,
-                "gas": int(estimated_gas * 1.2),
-                "maxFeePerGas": int(max_fee),
-                "maxPriorityFeePerGas": int(max_priority_fee),
-                "nonce": self.used_nonce[address],
-                "chainId": web3.eth.chain_id
-            })
+            if token_type == "native":
+                liquidity_data = token_contract.functions.multicall(calldata)
+                estimated_gas = liquidity_data.estimate_gas({"from": address, "value":amount1_desired})
+                liquidity_tx = liquidity_data.build_transaction({
+                    "from": address,
+                    "value": amount1_desired,
+                    "gas": int(estimated_gas * 1.2),
+                    "maxFeePerGas": int(max_fee),
+                    "maxPriorityFeePerGas": int(max_priority_fee),
+                    "nonce": self.used_nonce[address],
+                    "chainId": web3.eth.chain_id
+                })
+
+            elif token_type == "erc20":
+                liquidity_data = token_contract.functions.mint(calldata)
+                estimated_gas = liquidity_data.estimate_gas({"from": address})
+                liquidity_tx = liquidity_data.build_transaction({
+                    "from": address,
+                    "gas": int(estimated_gas * 1.2),
+                    "maxFeePerGas": int(max_fee),
+                    "maxPriorityFeePerGas": int(max_priority_fee),
+                    "nonce": self.used_nonce[address],
+                    "chainId": web3.eth.chain_id
+                })
 
             tx_hash = await self.send_raw_transaction_with_retries(account, web3, liquidity_tx)
             receipt = await self.wait_for_receipt_with_retries(web3, tx_hash)
@@ -697,6 +745,17 @@ class UOMI:
 
         while True:
             try:
+                uomi_amount = float(input(f"{Fore.YELLOW + Style.BRIGHT}Enter UOMI Amount -> {Style.RESET_ALL}").strip())
+                if uomi_amount > 0:
+                    self.uomi_amount = uomi_amount
+                    break
+                else:
+                    print(f"{Fore.RED + Style.BRIGHT}UOMI Amount must be > 0.{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a float or decimal number.{Style.RESET_ALL}")
+        
+        while True:
+            try:
                 wuomi_amount = float(input(f"{Fore.YELLOW + Style.BRIGHT}Enter WUOMI Amount -> {Style.RESET_ALL}").strip())
                 if wuomi_amount > 0:
                     self.wuomi_amount = wuomi_amount
@@ -705,7 +764,7 @@ class UOMI:
                     print(f"{Fore.RED + Style.BRIGHT}WUOMI Amount must be > 0.{Style.RESET_ALL}")
             except ValueError:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a float or decimal number.{Style.RESET_ALL}")
-        
+
         while True:
             try:
                 syn_amount = float(input(f"{Fore.YELLOW + Style.BRIGHT}Enter SYN Amount -> {Style.RESET_ALL}").strip())
@@ -957,8 +1016,8 @@ class UOMI:
                 f"{Fore.RED+Style.BRIGHT} Perform On-Chain Failed {Style.RESET_ALL}"
             )
 
-    async def process_perform_liquidity(self, account: str, address: str, token0: str, token1: str, amount0_desired: int, amount1_desired: int, use_proxy: bool):
-        tx_hash, block_number = await self.perform_liquidity(account, address, token0, token1, amount0_desired, amount1_desired, use_proxy)
+    async def process_perform_liquidity(self, account: str, address: str, token_type: str, token0: str, token1: str, amount0_desired: int, amount1_desired: int, use_proxy: bool):
+        tx_hash, block_number = await self.perform_liquidity(account, address, token_type, token0, token1, amount0_desired, amount1_desired, use_proxy)
         if tx_hash and block_number:
             explorer = f"https://explorer.uomi.ai/tx/{tx_hash}"
             self.log(
@@ -1072,7 +1131,7 @@ class UOMI:
                 f"{Fore.WHITE+Style.BRIGHT} {i+1} / {self.liquidity_count} {Style.RESET_ALL}                           "
             )
 
-            liquidity_option, ticker0, ticker1, token0, token1, amount0_desired = self.generate_liquidity_option()
+            liquidity_option, token_type, ticker0, ticker1, token0, token1, amount0_desired = self.generate_liquidity_option()
 
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}   Option   :{Style.RESET_ALL}"
@@ -1080,7 +1139,13 @@ class UOMI:
             )
 
             balance0 = await self.get_token_balance(address, token0, use_proxy)
-            balance1 = await self.get_token_balance(address, token1, use_proxy)
+
+            if token_type == "native":
+                balance1 = await self.get_token_balance(address, "UOMI", use_proxy)
+
+            elif token_type == "erc20":
+                balance1 = await self.get_token_balance(address, token1, use_proxy)
+
             self.log(f"{Fore.CYAN+Style.BRIGHT}   Balance  :{Style.RESET_ALL}")
             self.log(
                 f"{Fore.MAGENTA+Style.BRIGHT}      ● {Style.RESET_ALL}"
@@ -1127,7 +1192,7 @@ class UOMI:
                 )
                 continue
             
-            await self.process_perform_liquidity(account, address, token0, token1, amount0_desired, amount1_desired, use_proxy)
+            await self.process_perform_liquidity(account, address, token_type, token0, token1, amount0_desired, amount1_desired, use_proxy)
             await self.print_timer()
 
     async def process_accounts(self, account: str, address: str, option: int, use_proxy: bool, rotate_proxy: bool):
