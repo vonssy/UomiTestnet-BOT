@@ -460,7 +460,7 @@ class UOMI:
                 block_number = receipt.blockNumber
                 self.used_nonce[address] += 1
 
-                explorer = f"https://testnet.pharosscan.xyz/tx/{tx_hash}"
+                explorer = f"https://explorer.uomi.ai/tx/{tx_hash}"
                 
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}   Approve  :{Style.RESET_ALL}"
@@ -562,7 +562,7 @@ class UOMI:
             deadline = int(time.time()) + 600
 
             if token_type == "native":
-                prefix = bytes.fromhex("88316456")
+                mint_prefix = bytes.fromhex("88316456")
                 mint_params = encode(
                     [
                         'address', 'address', 'uint24', 'int24', 'int24', 'uint256', 
@@ -574,10 +574,9 @@ class UOMI:
                     ]
                 )
 
-                mint =  prefix + mint_params
-                refund_eth = bytes.fromhex("12210e8a")
+                refund_eth_prefix = bytes.fromhex("12210e8a")
 
-                calldata = [mint, refund_eth]
+                calldata = [mint_prefix + mint_params, refund_eth_prefix]
 
             elif token_type == "erc20":
                 calldata = (
@@ -1158,7 +1157,7 @@ class UOMI:
 
             path = bytes.fromhex(token0[2:]) + (3000).to_bytes(3, "big") + bytes.fromhex(token1[2:])
             amount1_desired = await self.get_amount_out_min(address, path, amount0_desired, use_proxy)
-            if not amount0_desired:
+            if not amount1_desired:
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}   Status   :{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} Fetch {token0} per {token1} Current Price Failed {Style.RESET_ALL}"
